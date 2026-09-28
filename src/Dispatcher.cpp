@@ -19,6 +19,7 @@ namespace mesh {
 void Dispatcher::begin() {
   n_sent_flood = n_sent_direct = 0;
   n_recv_flood = n_recv_direct = 0;
+  n_reserve_drops = 0;
   _err_flags = 0;
   radio_nonrx_start = _ms->getMillis();
 
@@ -50,6 +51,37 @@ void Dispatcher::updateTxBudget() {
     }
     last_budget_update = now;
   }
+}
+
+unsigned long Dispatcher::getMaxTxBudget() const {
+  float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
+  return (unsigned long)(getDutyCycleWindowMs() * duty_cycle);
+}
+
+unsigned long Dispatcher::getAirtimeFloor(uint8_t scope) const {
+  uint32_t pct = 0;
+  for (uint8_t s = 0; s < NUM_SECURE_SCOPES && s < scope; s++) {   // sum of reservations for all MORE privileged scopes
+    pct += getAirtimeReservePct(s);
+  }
+  if (pct > 100) pct = 100;
+  return (unsigned long)((uint64_t)getMaxTxBudget() * pct / 100);
+}
+
+int Dispatcher::getPoolFloor(uint8_t scope) const {
+  int n = 0;
+  for (uint8_t s = 0; s < NUM_SECURE_SCOPES && s < scope; s++) {
+    n += getPoolReserve(s);
+  }
+  return n;
+}
+
+uint8_t Dispatcher::getMaxScopeForBudget(unsigned long needed) const {
+  if (tx_budget_ms >= getAirtimeFloor(SCOPE_NONE) + needed) return SCOPE_NONE;   // no restriction
+
+  for (int s = NUM_SECURE_SCOPES - 1; s > 0; s--) {
+    if (tx_budget_ms >= getAirtimeFloor(s) + needed) return s;
+  }
+  return SCOPE_EMERGENCY;  // only what is reserved for S0 remains
 }
 
 int Dispatcher::calcRxDelay(float score, uint32_t air_time) const {
@@ -184,6 +216,7 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   }
 
   memcpy(pkt->payload, &raw[i], pkt->payload_len);
+  pkt->scope = SCOPE_UNCLASSIFIED;
 
   return true;  // success
 }
@@ -216,12 +249,22 @@ void Dispatcher::checkRecv() {
       pkt = NULL;
     }
   }
-  if (pkt) {
+  if (pkt) {   // NOTE: outside of raw[] scope, as signature verification needs lots of stack
+    pkt->scope = classifyRecvPacket(pkt);
+    if (_mgr->getFreeCount() < getPoolFloor(pkt->scope)) {   // remaining pool slots are reserved for more privileged scopes
+      MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): pool reserved, dropping packet (scope=%d)", getLogDateTime(), (uint32_t)pkt->scope);
+      n_reserve_drops++;
+      _err_flags |= ERR_EVENT_RESERVE_DROP;
+      _mgr->free(pkt);
+      return;
+    }
+
     #if MESH_PACKET_LOGGING
     Serial.print(getLogDateTime());
     Serial.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d time=%d", 
             pkt->getRawLength(), pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
             (int)pkt->getSNR(), (int)_radio->getLastRSSI(), (int)(score*1000), air_time);
+    if (pkt->isReservedTraffic()) Serial.printf(" scope=S%d", (uint32_t)pkt->scope);
 
     static uint8_t packet_hash[MAX_HASH_SIZE];
     pkt->calculatePacketHash(packet_hash);
@@ -259,6 +302,9 @@ void Dispatcher::checkRecv() {
 }
 
 void Dispatcher::processRecvPacket(Packet* pkt) {
+  if (pkt->scope == SCOPE_UNCLASSIFIED) {   // eg. injected by a bridge
+    pkt->scope = classifyRecvPacket(pkt);
+  }
   DispatcherAction action = onRecvPacket(pkt);
   if (action == ACTION_RELEASE) {
     _mgr->free(pkt);
@@ -284,6 +330,11 @@ void Dispatcher::checkSend() {
     next_tx_time = futureMillis((unsigned long)(needed / duty_cycle));
     return;
   }
+
+  uint8_t max_scope = getMaxScopeForBudget(est_airtime / MIN_TX_BUDGET_AIRTIME_DIV);
+  if (max_scope != SCOPE_NONE && _mgr->getOutboundCount(_ms->getMillis(), max_scope) == 0) {
+    return;   // remaining budget is reserved, and no traffic of a reserved scope is waiting
+  }
   
   if (!millisHasNowPassed(next_tx_time)) return;
   if (_radio->isReceiving()) {
@@ -304,7 +355,7 @@ void Dispatcher::checkSend() {
   }
   cad_busy_start = 0;  // reset busy state
 
-  outbound = _mgr->getNextOutbound(_ms->getMillis());
+  outbound = _mgr->getNextOutbound(_ms->getMillis(), max_scope);
   if (outbound) {
     int len = 0;
     uint8_t raw[MAX_TRANS_UNIT];
@@ -342,6 +393,7 @@ void Dispatcher::checkSend() {
       Serial.print(getLogDateTime());
       Serial.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", 
             len, outbound->getPayloadType(), outbound->isRouteDirect() ? "D" : "F", outbound->payload_len);
+      if (outbound->isReservedTraffic()) Serial.printf(" scope=S%d", (uint32_t)outbound->scope);
       if (outbound->getPayloadType() == PAYLOAD_TYPE_PATH || outbound->getPayloadType() == PAYLOAD_TYPE_REQ
         || outbound->getPayloadType() == PAYLOAD_TYPE_RESPONSE || outbound->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
         Serial.printf(" [%02X -> %02X]\n", (uint32_t)outbound->payload[1], (uint32_t)outbound->payload[0]);
@@ -355,11 +407,16 @@ void Dispatcher::checkSend() {
 
 Packet* Dispatcher::obtainNewPacket() {
   auto pkt = _mgr->allocNew();  // TODO: zero out all fields
+  if (pkt && _mgr->getFreeCount() < getPoolFloor(SCOPE_NONE)) {   // remaining slots are reserved for secure scopes
+    _mgr->free(pkt);
+    pkt = NULL;
+  }
   if (pkt == NULL) {
     _err_flags |= ERR_EVENT_FULL;
   } else {
     pkt->payload_len = pkt->path_len = 0;
     pkt->_snr = 0;
+    pkt->scope = SCOPE_NONE;
   }
   return pkt;
 }

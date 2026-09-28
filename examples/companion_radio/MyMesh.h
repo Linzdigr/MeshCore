@@ -69,6 +69,7 @@
 
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
+#include <helpers/SecureScopes.h>
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -114,6 +115,7 @@ protected:
   bool allowPacketForward(const mesh::Packet* packet) override;
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
+  void signForSecureScope(mesh::Packet* pkt, const uint8_t* secret);
   void sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0) override;
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
@@ -231,6 +233,8 @@ private:
   unsigned long dirty_contacts_expiry;
 
   TransportKey send_scope;
+  mesh::LocalIdentity secure_scope_id;   // only valid if _prefs.secure_scope_idx < NUM_SECURE_SCOPES
+  uint32_t secure_n_signed, secure_n_unsigned;
 
   uint8_t cmd_frame[MAX_FRAME_SIZE + 1];
   uint8_t out_frame[MAX_FRAME_SIZE + 1];

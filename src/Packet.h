@@ -36,6 +36,14 @@ namespace mesh {
 #define PAYLOAD_VER_3       0x02   // FUTURE
 #define PAYLOAD_VER_4       0x03   // FUTURE
 
+// Secure scopes (see helpers/SecureScopes.h), the traffic class of a packet
+#define NUM_SECURE_SCOPES     3
+#define SCOPE_EMERGENCY       0      // S0
+#define SCOPE_ADMIN           1      // S1
+#define SCOPE_PRIVATE         2      // S2
+#define SCOPE_UNCLASSIFIED    0xFE   // received, not yet checked
+#define SCOPE_NONE            0xFF   // public traffic (also: 'any scope', when used as a filter)
+
 /**
  * \brief  The fundamental transmission unit.
 */
@@ -49,6 +57,10 @@ public:
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
+
+  uint8_t scope;   // in-memory only: one of SCOPE_*. Only S0..S2 once the packet's scope proof has been verified
+
+  bool isReservedTraffic() const { return scope < NUM_SECURE_SCOPES; }
 
   /**
    * \brief calculate the hash of payload + type

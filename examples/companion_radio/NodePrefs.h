@@ -40,6 +40,7 @@ public:
   uint8_t autoadd_max_hops = 0;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
   char default_scope_name[31];
   uint8_t default_scope_key[16];
+  uint8_t secure_scope_idx = 0xFF;   // secure scope to sign floods with (0xFF = none), key is in '_scope' identity
 
 private:
   class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
@@ -107,6 +108,7 @@ private:
       def("auto_max", _parent->autoadd_max_hops);  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
       def("defs_nm", _parent->default_scope_name, sizeof(_parent->default_scope_name));
       def("defs_key", (void *) _parent->default_scope_key, sizeof(_parent->default_scope_key));
+      def("sscope", _parent->secure_scope_idx);
       def("pin", _parent->ble_pin);
       def("buzz_q", _parent->buzzer_quiet);
       def("vibe_q", _parent->vibe_quiet);

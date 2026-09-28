@@ -8,24 +8,29 @@ PacketQueue::PacketQueue(int max_entries) {
   _num = 0;
 }
 
-int PacketQueue::countBefore(uint32_t now) const {
-  if (now == 0xFFFFFFFF) return _num;  // sentinel: count all entries regardless of schedule
+int PacketQueue::countBefore(uint32_t now, uint8_t max_scope) const {
+  if (now == 0xFFFFFFFF && max_scope == SCOPE_NONE) return _num;  // sentinel: count all entries regardless of schedule
 
   int n = 0;
   for (int j = 0; j < _num; j++) {
-    if ((int32_t)(_schedule_table[j] - now) > 0) continue;   // scheduled for future... ignore for now
+    if (now != 0xFFFFFFFF && (int32_t)(_schedule_table[j] - now) > 0) continue;   // scheduled for future... ignore for now
+    if (_table[j]->scope > max_scope) continue;
     n++;
   }
   return n;
 }
 
-mesh::Packet* PacketQueue::get(uint32_t now) {
-  uint8_t min_pri = 0xFF;
+mesh::Packet* PacketQueue::get(uint32_t now, uint8_t max_scope) {
+  uint16_t best_rank = 0xFFFF;
   int best_idx = -1;
   for (int j = 0; j < _num; j++) {
     if ((int32_t)(_schedule_table[j] - now) > 0) continue;   // scheduled for future... ignore for now
-    if (_pri_table[j] < min_pri) {  // select most important priority amongst non-future entries
-      min_pri = _pri_table[j];
+    uint8_t scope = _table[j]->scope;
+    if (scope > max_scope) continue;
+    // secure scopes first (S0 before S1 ...), then by priority. Public traffic ranks after all secure scopes
+    uint16_t rank = ((uint16_t)(scope < NUM_SECURE_SCOPES ? scope : NUM_SECURE_SCOPES) << 8) | _pri_table[j];
+    if (rank < best_rank) {  // select most important amongst non-future entries
+      best_rank = rank;
       best_idx = j;
     }
   }
@@ -97,6 +102,14 @@ mesh::Packet* StaticPoolPacketManager::getNextOutbound(uint32_t now) {
 
 int  StaticPoolPacketManager::getOutboundCount(uint32_t now) const {
   return send_queue.countBefore(now);
+}
+
+mesh::Packet* StaticPoolPacketManager::getNextOutbound(uint32_t now, uint8_t max_scope) {
+  return send_queue.get(now, max_scope);
+}
+
+int  StaticPoolPacketManager::getOutboundCount(uint32_t now, uint8_t max_scope) const {
+  return send_queue.countBefore(now, max_scope);
 }
 
 int  StaticPoolPacketManager::getOutboundTotal() const {

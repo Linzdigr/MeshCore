@@ -8,6 +8,7 @@ Packet::Packet() {
   header = 0;
   path_len = 0;
   payload_len = 0;
+  scope = SCOPE_NONE;
 }
 
 bool Packet::isValidPathLen(uint8_t path_len) {
@@ -81,6 +82,7 @@ bool Packet::readFrom(const uint8_t src[], uint8_t len) {
   payload_len = len - i;
   if (payload_len > sizeof(payload)) return false;  // bad encoding
   memcpy(payload, &src[i], payload_len); //i += payload_len;
+  scope = SCOPE_UNCLASSIFIED;
   return true;   // success
 }
 

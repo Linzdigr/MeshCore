@@ -428,6 +428,34 @@ Byte 0: 0x14
 
 ---
 
+### 9. Set Secure Scope
+
+**Purpose**: Make this companion a member of a secure scope (S0 emergency, S1 admin, S2 private). While set, the messages this companion floods (direct messages, channel messages, channel data, logins) are signed for that scope, so repeaters holding the scope's public key give them precedence and reserved capacity. ACKs, paths, adverts and other requests are not signed, and neither are direct-routed packets. Signed messages are still sent with the normal flood scope, and remain readable and forwardable by all firmware versions. See `scope` in the CLI commands.
+
+**Command Format**:
+```
+Byte 0: 0x42
+Byte 1: Scope index (0 = S0, 1 = S1, 2 = S2)
+Bytes 2-65: Ed25519 private key (64 bytes, same format as CMD_IMPORT_PRIVATE_KEY)
+```
+
+To leave the scope, send `42 FF`. To query, send `42` alone.
+
+**Response**: `PACKET_OK` (0x00), or `PACKET_ERROR` (0x01) with `ERR_CODE_ILLEGAL_ARG` for a bad scope index or key.
+
+The query response is `PACKET_SECURE_SCOPE` (0x1D):
+```
+Byte 0: 0x1D
+Byte 1: Scope index (0xFF = none)
+Bytes 2-33: Scope public key                          (only if scope index is not 0xFF)
+Bytes 34-37: Num messages signed since boot (uint32)   (only if scope index is not 0xFF)
+Bytes 38-41: Num messages too big to be signed, sent without scope privileges (uint32)
+```
+
+**Note**: The key is persisted on the device (internal flash). The proof takes 80 bytes (plus 16 when a text exactly fills its last cipher block), so direct messages up to about 90 characters can be signed; longer ones are sent normally, without scope privileges (counted in bytes 38-41). Replies from recipients are not signed. Builds with `MESH_DEBUG=1` log each signed message on the serial console (`SCOPE TX S0 signed key=... type=... len=...`).
+
+---
+
 ## Channel Management
 
 ### Channel Types

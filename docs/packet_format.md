@@ -64,6 +64,10 @@ This is the protocol level packet structure used in MeshCore firmware v1.12.0
     - Generally this is the remainder of the raw packet data
     - The firmware parses this data based on the provided Payload Type
     - v1.12.0 firmware and older drops packets with `payload` sizes [larger than 184](https://github.com/meshcore-dev/MeshCore/blob/e812632235274ffd2382adf5354168aec765d416/src/Dispatcher.cpp#L152)
+    - Secure scopes: a `TXT_MSG`, `GRP_TXT`, `GRP_DATA` or `ANON_REQ` payload may end with an 80-byte proof, appended after the ciphertext, the MAC being re-calculated to cover it:
+        - `signature` (64) | `version` (1, `0x01`) | `scope_index` (1: `0` S0 emergency, `1` S1 admin, `2` S2 private) | `key_hint` (2, first bytes of signer's public key) | `timestamp` (4, `uint32_t` epoch secs) | reserved (4, zero) | magic (4, `53 43 50 01`)
+        - The Ed25519 signature is over: `payload_type` (1) | payload before the proof, with the 2 MAC bytes set to zero | proof bytes 64..79
+        - Route, transport codes and path are unchanged, so any firmware forwards it with its normal rules. Receivers decrypt the proof into trailing bytes which they ignore (texts end at their null terminator, which the signer guarantees is present; group data has an explicit length)
 
 ### Packet Format
 

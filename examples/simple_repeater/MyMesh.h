@@ -35,6 +35,7 @@
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
+#include <helpers/SecureScopes.h>
 #include "RateLimiter.h"
 
 #ifdef WITH_BRIDGE
@@ -98,6 +99,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionMap region_map, temp_map;
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
+  SecureScopes secure_scopes;
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
   uint32_t pending_discover_tag;
@@ -147,6 +149,14 @@ protected:
 
   uint32_t getRetransmitDelay(const mesh::Packet* packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet* packet) override;
+
+  uint8_t classifyRecvPacket(mesh::Packet* pkt) override;
+  uint8_t getAirtimeReservePct(uint8_t scope) const override {
+    return secure_scopes.getAirtimeReservePct(scope);
+  }
+  uint8_t getPoolReserve(uint8_t scope) const override {
+    return secure_scopes.getPoolReserve(scope);
+  }
 
   int getInterferenceThreshold() const override {
     return _prefs.interference_threshold;
@@ -221,6 +231,8 @@ public:
   void startRegionsLoad() override;
   bool saveRegions() override;
   void onDefaultRegionChanged(const RegionEntry* r) override;
+  bool saveSecureScopes() override;
+  uint32_t getNumPoolReserveDrops() override { return getNumReserveDrops(); }
 
   mesh::LocalIdentity& getSelfId() override { return self_id; }
 

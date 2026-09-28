@@ -33,6 +33,9 @@ public:
   FILESYSTEM* getSecondaryFS() const { return _fsExtra; }
   bool loadMainIdentity(mesh::LocalIdentity &identity);
   bool saveMainIdentity(const mesh::LocalIdentity &identity);
+  bool loadScopeIdentity(mesh::LocalIdentity &identity);
+  bool saveScopeIdentity(const mesh::LocalIdentity &identity);
+  bool removeScopeIdentity();
   void loadPrefs(NodePrefs& prefs);
   bool savePrefs(NodePrefs& prefs);
   void loadContacts(DataStoreHost* host);

@@ -31,6 +31,18 @@ public:
   }
 #endif
 
+  // same as wasSeen(), without counting duplicates
+  bool isKnown(const mesh::Packet* packet) const {
+    uint8_t hash[MAX_HASH_SIZE];
+    packet->calculatePacketHash(hash);
+
+    const uint8_t* sp = _hashes;
+    for (int i = 0; i < MAX_PACKET_HASHES; i++, sp += MAX_HASH_SIZE) {
+      if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) return true;
+    }
+    return false;
+  }
+
   bool wasSeen(const mesh::Packet* packet) override {
     uint8_t hash[MAX_HASH_SIZE];
     packet->calculatePacketHash(hash);

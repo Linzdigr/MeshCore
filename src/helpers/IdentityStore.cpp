@@ -91,3 +91,10 @@ bool IdentityStore::save(const char *name, const mesh::LocalIdentity& id, const 
   }
   return false;
 }
+
+bool IdentityStore::remove(const char *name) {
+  char filename[40];
+  sprintf(filename, "%s/%s.id", _dir, name);
+  if (!_fs->exists(filename)) return true;
+  return _fs->remove(filename);
+}

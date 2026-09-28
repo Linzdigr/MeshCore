@@ -317,6 +317,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
           *(dp-1) = 0; // remove last CR
         }
       }
+    } else if (memcmp(command, "scope", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+      handleScopeCmd(command, reply);
     } else if (memcmp(command, "region", 6) == 0) {
       handleRegionCmd(command, reply);
 #if ENV_INCLUDE_GPS == 1
@@ -1175,5 +1177,133 @@ void CommonCLI::handleRegionCmd(char* command, char* reply) {
     }
   } else {
     strcpy(reply, "Err - ??");
+  }
+}
+
+static bool isHexString(const char* s, int* len) {
+  int n = 0;
+  while (s[n]) {
+    char c = s[n];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    n++;
+  }
+  *len = n;
+  return n > 0 && (n & 1) == 0;
+}
+
+void CommonCLI::handleScopeCmd(char* command, char* reply) {
+  reply[0] = 0;
+  if (_scopes == NULL) {
+    strcpy(reply, "Err - scopes not supported");
+    return;
+  }
+
+  const char* parts[5];
+  int n = mesh::Utils::parseTextParts(command, parts, 5, ' ');
+  int idx = -1;
+  bool modified = false;
+
+  if (n == 1) {   // summary of all scopes
+    char* dp = reply;
+    for (int i = 0; i < NUM_SECURE_SCOPES; i++) {
+      auto& cfg = _scopes->getConfig(i);
+      dp += sprintf(dp, "%sS%d %s: %dk air=%d%% pool=%d%s", i > 0 ? "\n" : "", i, SecureScopes::getName(i),
+                    cfg.num_keys, cfg.airtime_pct, cfg.pool_slots, cfg.num_keys == 0 ? " (inactive)" : "");
+    }
+  } else if (strcmp(parts[1], "stats") == 0) {
+    char* dp = reply;
+    for (int i = 0; i < NUM_SECURE_SCOPES; i++) {
+      dp += sprintf(dp, "S%d ok=%u bad=%u, ", i, (uint32_t)_scopes->getNumVerified(i), (uint32_t)_scopes->getNumRejected(i));
+    }
+    sprintf(dp, "unk=%u drops=%u", (uint32_t)_scopes->getNumUnknown(), (uint32_t)_callbacks->getNumPoolReserveDrops());
+  } else if (strcmp(parts[1], "maxage") == 0) {
+    if (n >= 3) {
+      _scopes->setMaxAge(_atoi(parts[2]));
+      modified = true;
+    } else {
+      sprintf(reply, "> %u", (uint32_t)_scopes->getMaxAge());
+    }
+  } else if (n >= 3 && strcmp(parts[1], "key") != 0 && (idx = SecureScopes::parseScope(parts[2])) < 0) {
+    strcpy(reply, "Err - unknown scope (S0, S1, S2)");
+  } else if (n >= 3 && strcmp(parts[1], "get") == 0) {
+    auto& cfg = _scopes->getConfig(idx);
+    sprintf(reply, " S%d %s keys=%d air=%d%% pool=%d%s", idx, SecureScopes::getName(idx), cfg.num_keys,
+            cfg.airtime_pct, cfg.pool_slots, cfg.num_keys == 0 ? " (inactive)" : "");
+  } else if (n >= 4 && strcmp(parts[1], "airtime") == 0) {
+    if (_scopes->setAirtimeReserve(idx, _atoi(parts[3]))) {
+      modified = true;
+    } else {
+      sprintf(reply, "Err - total airtime reserve max is %d%%", MAX_SCOPE_AIRTIME_TOTAL);
+    }
+  } else if (n >= 4 && strcmp(parts[1], "pool") == 0) {
+    if (_scopes->setPoolReserve(idx, _atoi(parts[3]))) {
+      modified = true;
+    } else {
+      sprintf(reply, "Err - total pool reserve max is %d", MAX_SCOPE_POOL_TOTAL);
+    }
+  } else if (n >= 3 && strcmp(parts[1], "clear") == 0) {
+    _scopes->clearScope(idx);
+    modified = true;
+  } else if (n >= 4 && strcmp(parts[1], "key") == 0) {   // scope key {add|del|list} {scope} [pubkey-hex]
+    idx = SecureScopes::parseScope(parts[3]);
+    int hex_len = 0;
+    if (idx < 0) {
+      strcpy(reply, "Err - unknown scope (S0, S1, S2)");
+    } else if (strcmp(parts[2], "list") == 0) {
+      auto& cfg = _scopes->getConfig(idx);
+      char* dp = reply;
+      for (int i = 0; i < cfg.num_keys; i++) {
+        mesh::Utils::toHex(dp, cfg.pub_keys[i], 8);   // 16 hex chars is enough to identify a key
+        dp += 16;
+        *dp++ = ' ';
+      }
+      if (dp > reply) dp--;
+      *dp = 0;
+      if (cfg.num_keys == 0) strcpy(reply, "-none-");
+    } else if (n < 5 || !isHexString(parts[4], &hex_len)) {
+      strcpy(reply, "Err - bad pubkey hex");
+    } else if (strcmp(parts[2], "add") == 0) {
+      uint8_t pub_key[PUB_KEY_SIZE];
+      if (hex_len != PUB_KEY_SIZE*2 || !mesh::Utils::fromHex(pub_key, PUB_KEY_SIZE, parts[4])) {
+        sprintf(reply, "Err - pubkey must be %d hex chars", PUB_KEY_SIZE*2);
+      } else {
+        int res = _scopes->addKey(idx, pub_key);
+        if (res < 0) {
+          sprintf(reply, "Err - max %d keys per scope", MAX_SCOPE_KEYS);
+        } else {
+          modified = true;
+        }
+      }
+    } else if (strcmp(parts[2], "del") == 0) {
+      uint8_t prefix[PUB_KEY_SIZE];
+      if (hex_len > PUB_KEY_SIZE*2 || !mesh::Utils::fromHex(prefix, hex_len / 2, parts[4])) {
+        strcpy(reply, "Err - bad pubkey hex");
+      } else {
+        int res = _scopes->removeKey(idx, prefix, hex_len / 2);
+        if (res < 0) {
+          strcpy(reply, "Err - ambiguous prefix");
+        } else if (res == 0) {
+          strcpy(reply, "Err - not found");
+        } else {
+          modified = true;
+        }
+      }
+    } else {
+      strcpy(reply, "Err - use key add|del|list");
+    }
+  } else {
+    strcpy(reply, "Err - ??");
+  }
+
+  if (modified) {   // persist straight away, like 'set' commands
+    if (!_callbacks->saveSecureScopes()) {
+      strcpy(reply, "Err - save failed");
+    } else if (idx >= 0) {
+      auto& cfg = _scopes->getConfig(idx);
+      sprintf(reply, "OK - S%d keys=%d air=%d%% pool=%d%s", idx, cfg.num_keys, cfg.airtime_pct, cfg.pool_slots,
+              cfg.num_keys == 0 ? " (inactive)" : "");
+    } else {
+      strcpy(reply, "OK");
+    }
   }
 }

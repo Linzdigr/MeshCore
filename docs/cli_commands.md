@@ -16,6 +16,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - [ACL](#acl)
   - [Region Management](#region-management-v110)
     - [Region Examples](#region-examples)
+  - [Secure Scopes](#secure-scopes-repeater-only)
   - [GPS](#gps-when-gps-support-is-compiled-in)
   - [Sensors](#sensors-when-sensor-support-is-compiled-in)
   - [Bridge](#bridge-when-bridge-support-is-compiled-in)
@@ -992,6 +993,147 @@ region save
 - Useful for global networks with specific regional rules
 
 ---
+### Secure Scopes (Repeater Only)
+
+Secure scopes reserve part of a repeater's capacity for specific teams. There are 3 scopes:
+
+| Scope | Name        | Intended use                             |
+|-------|-------------|------------------------------------------|
+| `S0`  | `emergency` | Emergency teams                          |
+| `S1`  | `admin`     | Admin requests to repeaters              |
+| `S2`  | `private`   | Private use of the repeater (eg. owner)  |
+
+Each scope is identified by up to 4 Ed25519 **public** keys (eg. one per team). The matching private key stays on the team's companion radio, which signs the messages it floods: direct messages, channel messages, channel data, and logins (see `CMD_SET_SECURE_SCOPE` in the companion protocol). ACKs, paths, adverts and other requests are not signed.
+
+The signature (proof) travels inside the message itself, in a single packet: route, region code and headers are unchanged, and the proof is appended as 5 extra cipher blocks (80 bytes). So **all firmware versions** relay and read signed messages as usual; nodes without this feature just give them no priority.
+
+A repeater with the scope's key verifies the signature, and only then gives the packet:
+
+- **precedence** in the transmit queue (`S0` before `S1` before `S2` before public traffic),
+- a reserved share of its **airtime** (TX duty cycle budget),
+- a reserved number of **packet buffers** (slots in the packet pool),
+- forwarding regardless of region rules and `flood.max.unscoped` (`flood.max` and loop detection still apply).
+
+Reservations are layered: public traffic cannot use what is reserved for `S0`-`S2`, `S2` cannot use what is reserved for `S0`-`S1`, and `S1` cannot use what is reserved for `S0`. Reservations are only in effect while a scope has at least one key.
+
+A packet whose proof cannot be verified (no key configured on this repeater, unknown key, altered, too old) is handled exactly like any other packet, with no privileges.
+
+**Note:** Changes are saved immediately.
+
+---
+
+#### Show all scopes
+**Usage:**
+- `scope`
+
+---
+
+#### Show a scope
+**Usage:**
+- `scope get <scope>`
+
+**Parameters:**
+- `scope`: `S0`, `S1`, `S2` (or `0`-`2`, or `emergency`, `admin`, `private`)
+
+---
+
+#### Add or remove a team's public key
+**Usage:**
+- `scope key add <scope> <pubkey>`
+- `scope key del <scope> <pubkey-prefix>`
+- `scope key list <scope>`
+
+**Parameters:**
+- `pubkey`: Ed25519 public key (32 bytes), written as 64 hex characters. It is only stored on the repeater, never sent over the air
+- `pubkey-prefix`: enough leading hex characters of the key to identify it
+
+**Note:** Max 4 keys per scope
+
+---
+
+#### Reserve airtime for a scope
+**Usage:**
+- `scope airtime <scope> <percent>`
+
+**Parameters:**
+- `percent`: Share of the TX duty cycle budget reserved for this scope
+
+**Default:** `10` for `S0`, `0` for `S1` and `S2`
+
+**Note:** The total across all scopes is limited to 50%
+
+---
+
+#### Reserve packet buffers for a scope
+**Usage:**
+- `scope pool <scope> <slots>`
+
+**Parameters:**
+- `slots`: Number of packet buffers reserved for this scope
+
+**Default:** `4` for `S0`, `0` for `S1` and `S2` (the repeater has 32 packet buffers)
+
+**Note:** The total across all scopes is limited to 16
+
+---
+
+#### Limit the age of scoped packets
+**Usage:**
+- `scope maxage`
+- `scope maxage <seconds>`
+
+**Parameters:**
+- `seconds`: Max age of the packet's signed timestamp. `0` disables the check
+
+**Default:** `0`
+
+**Note:** Only checked while this repeater's clock is set, so that a repeater with a wrong clock never drops emergency traffic. Duplicates are always dropped, regardless of this setting.
+
+---
+
+#### Remove all keys and reservations of a scope
+**Usage:**
+- `scope clear <scope>`
+
+---
+
+#### Show secure scope counters
+**Usage:**
+- `scope stats`
+
+**Note:** `ok`: packets verified, `bad`: signature, age or replay check failed, `unk`: claimed scope has no keys here, `drops`: public packets dropped to keep packet buffers reserved. Reset by `clear stats`.
+
+---
+
+#### Checking that scopes are used (logs)
+
+With `log start`, every signature check is written to the packet log (read it with `log` on the serial console), and received/sent packets that have scope privileges are tagged:
+```
+12:04:31 - 28/9/2026 U: SCOPE S0 OK key=8A3F21C0 age=2s type=2 len=132
+12:04:31 - 28/9/2026 U: RX, len=137 (type=2, route=F, payload_len=132) SNR=9 RSSI=-71 score=1000 scope=S0 [AA -> BB]
+12:04:31 - 28/9/2026 U: TX, len=138 (type=2, route=F, payload_len=132) scope=S0 [AA -> BB]
+12:05:10 - 28/9/2026 U: SCOPE S0 bad-sig key=8A3F???? age=1s type=5 len=121
+```
+- `key`: first 4 bytes of the public key that verified the packet. When no key matched, only the 2-byte hint sent by the signer is known, followed by `????`
+- status: `OK`, `no-key` (no key for that scope on this repeater), `bad-sig` (unknown key, or altered packet), `too-old` (see `scope maxage`), `replay` (same signature seen on a different packet)
+- `age`: seconds between the signature's timestamp and this repeater's clock
+- duplicates (the same packet heard from several neighbours) are not re-checked, so are not logged
+
+Builds with `MESH_DEBUG=1` print the same `SCOPE` lines on the serial console, and builds with `MESH_PACKET_LOGGING=1` add `scope=Sx` to the RX/TX trace.
+
+---
+
+#### Secure Scope Example
+
+Set up an emergency scope, with 15% of airtime reserved:
+```
+scope key add S0 8A3F...(64 hex chars)...C21D
+scope airtime S0 15
+scope get S0
+```
+
+---
+
 ### GPS (When GPS support is compiled in)
 
 #### View or change GPS state

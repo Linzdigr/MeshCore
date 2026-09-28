@@ -62,6 +62,7 @@
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
+#define CMD_SET_SECURE_SCOPE          66
 
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
@@ -97,6 +98,7 @@
 #define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_CHANNEL_DATA_RECV   27
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
+#define RESP_CODE_SECURE_SCOPE        29
 
 #define MAX_CHANNEL_DATA_LENGTH       (MAX_FRAME_SIZE - 9)
 
@@ -497,7 +499,26 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
   }
 }
 
+void MyMesh::signForSecureScope(mesh::Packet* pkt, const uint8_t* secret) {
+  if (_prefs.secure_scope_idx >= NUM_SECURE_SCOPES) return;   // not a member of a secure scope
+  if (!SecureScopes::isSignable(pkt->getPayloadType())) return;   // only messages (and logins), not ACKs, paths, ...
+
+  char key_hex[9];
+  mesh::Utils::toHex(key_hex, secure_scope_id.pub_key, 4);
+  if (SecureScopes::sign(pkt, secret, _prefs.secure_scope_idx, secure_scope_id, getRTCClock()->getCurrentTime())) {
+    secure_n_signed++;
+    MESH_DEBUG_PRINTLN("SCOPE TX S%d signed key=%s type=%d len=%d", (uint32_t)_prefs.secure_scope_idx, key_hex,
+                       (uint32_t)pkt->getPayloadType(), (uint32_t)pkt->payload_len);
+  } else {
+    secure_n_unsigned++;   // still sent, but without scope privileges
+    MESH_DEBUG_PRINTLN("SCOPE TX S%d NOT signed (too big) key=%s type=%d len=%d", (uint32_t)_prefs.secure_scope_idx, key_hex,
+                       (uint32_t)pkt->getPayloadType(), (uint32_t)pkt->payload_len);
+  }
+}
+
 void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
+  signForSecureScope(pkt, recipient.getSharedSecret(self_id));   // then sent as normal, so any firmware can forward it
+
   // TODO: dynamic send_scope, depending on recipient and current 'home' Region
   if (send_unscoped) {
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);  // app has explicitly requested un-scoped
@@ -510,6 +531,8 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
   }
 }
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
+  signForSecureScope(pkt, channel.secret);   // then sent as normal, so any firmware can forward it
+
   // TODO: have per-channel send_scope
   if (send_unscoped) {
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);  // app has explicitly requested un-scoped
@@ -874,6 +897,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
+  secure_n_signed = secure_n_unsigned = 0;
 
   // defaults
   _prefs.airtime_factor = 1.0;
@@ -934,6 +958,9 @@ void MyMesh::begin(bool has_display) {
 
   // load persisted prefs
   _store->loadPrefs(_prefs);
+  if (_prefs.secure_scope_idx < NUM_SECURE_SCOPES && !_store->loadScopeIdentity(secure_scope_id)) {
+    _prefs.secure_scope_idx = SCOPE_NONE;   // key is missing
+  }
   sensors.node_lat = _prefs.node_lat;
   sensors.node_lon = _prefs.node_lon;
 
@@ -1953,6 +1980,39 @@ void MyMesh::handleCmdFrame(size_t len) {
       memset(_prefs.default_scope_key, 0, sizeof(_prefs.default_scope_key));
       savePrefs();
       writeOKFrame();
+    }
+  } else if (cmd_frame[0] == CMD_SET_SECURE_SCOPE && len == 1) {   // query
+    out_frame[0] = RESP_CODE_SECURE_SCOPE;
+    if (_prefs.secure_scope_idx < NUM_SECURE_SCOPES) {
+      out_frame[1] = _prefs.secure_scope_idx;
+      memcpy(&out_frame[2], secure_scope_id.pub_key, PUB_KEY_SIZE);
+      memcpy(&out_frame[2 + PUB_KEY_SIZE], &secure_n_signed, 4);      // num packets signed, since boot
+      memcpy(&out_frame[6 + PUB_KEY_SIZE], &secure_n_unsigned, 4);    // num packets too big to sign
+      _serial->writeFrame(out_frame, 10 + PUB_KEY_SIZE);
+    } else {
+      out_frame[1] = SCOPE_NONE;
+      _serial->writeFrame(out_frame, 2);
+    }
+  } else if (cmd_frame[0] == CMD_SET_SECURE_SCOPE && len >= 2 && cmd_frame[1] == SCOPE_NONE) {   // leave secure scope
+    _prefs.secure_scope_idx = SCOPE_NONE;
+    secure_scope_id = mesh::LocalIdentity();
+    _store->removeScopeIdentity();
+    savePrefs();
+    writeOKFrame();
+  } else if (cmd_frame[0] == CMD_SET_SECURE_SCOPE && len >= 2 + PRV_KEY_SIZE) {   // {scope-idx} {prv-key(64)}
+    if (cmd_frame[1] >= NUM_SECURE_SCOPES || !mesh::LocalIdentity::validatePrivateKey(&cmd_frame[2])) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    } else {
+      mesh::LocalIdentity id;
+      id.readFrom(&cmd_frame[2], PRV_KEY_SIZE);   // derives the pub_key
+      if (_store->saveScopeIdentity(id)) {
+        secure_scope_id = id;
+        _prefs.secure_scope_idx = cmd_frame[1];
+        savePrefs();
+        writeOKFrame();
+      } else {
+        writeErrFrame(ERR_CODE_FILE_IO_ERROR);
+      }
     }
   } else if (cmd_frame[0] == CMD_GET_DEFAULT_FLOOD_SCOPE) {
     out_frame[0] = RESP_CODE_DEFAULT_FLOOD_SCOPE;

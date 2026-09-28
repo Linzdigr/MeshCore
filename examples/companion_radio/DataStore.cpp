@@ -189,6 +189,18 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
   return identity_store.save("_main", identity);
 }
 
+bool DataStore::loadScopeIdentity(mesh::LocalIdentity &identity) {
+  return identity_store.load("_scope", identity);
+}
+
+bool DataStore::saveScopeIdentity(const mesh::LocalIdentity &identity) {
+  return identity_store.save("_scope", identity);
+}
+
+bool DataStore::removeScopeIdentity() {
+  return identity_store.remove("_scope");
+}
+
 void DataStore::loadPrefs(NodePrefs& prefs) {
   if (_fs->exists("/prefs.json")) {
     File file = openRead(_fs, "/prefs.json");

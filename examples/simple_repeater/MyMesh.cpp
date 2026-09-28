@@ -433,11 +433,14 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
+  // a verified secure scope is independent of Regions (and of the un-scoped hop limit)
+  bool verified_scope = packet->isReservedTraffic();
   if (packet->isRouteFlood()
-      && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped, _prefs.flood_max_advert)) {
+      && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, verified_scope ? 0xFF : _prefs.flood_max_unscoped,
+                                       _prefs.flood_max_advert)) {
     return false;
   }
-  if (packet->isRouteFlood() && recv_pkt_region == NULL) {
+  if (packet->isRouteFlood() && !verified_scope && recv_pkt_region == NULL) {
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
     return false;
   }
@@ -490,6 +493,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
       f.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d", len,
                pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
                (int)_radio->getLastSNR(), (int)_radio->getLastRSSI(), (int)(score * 1000));
+      if (pkt->isReservedTraffic()) f.printf(" scope=S%d", (uint32_t)pkt->scope);
 
       if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH || pkt->getPayloadType() == PAYLOAD_TYPE_REQ ||
           pkt->getPayloadType() == PAYLOAD_TYPE_RESPONSE || pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
@@ -515,6 +519,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
       f.print(getLogDateTime());
       f.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", len, pkt->getPayloadType(),
                pkt->isRouteDirect() ? "D" : "F", pkt->payload_len);
+      if (pkt->isReservedTraffic()) f.printf(" scope=S%d", (uint32_t)pkt->scope);
 
       if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH || pkt->getPayloadType() == PAYLOAD_TYPE_REQ ||
           pkt->getPayloadType() == PAYLOAD_TYPE_RESPONSE || pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
@@ -551,6 +556,36 @@ uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
   uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
   return getRNG()->nextInt(0, 5*t + 1);
+}
+
+uint8_t MyMesh::classifyRecvPacket(mesh::Packet* pkt) {
+  if (!SecureScopes::hasProof(pkt)) return SCOPE_NONE;
+  if (((SimpleMeshTables *)getTables())->isKnown(pkt)) return SCOPE_NONE;   // duplicate, will be discarded anyway. Skip the signature check
+
+  uint32_t now = getRTCClock()->getCurrentTime();
+  ScopeVerifyResult res;
+  uint8_t scope = secure_scopes.verify(pkt, now, &res);
+
+  // log every verification, so that scope usage can be checked in the field ('log start', then 'log')
+  char key_hex[9];
+  if (res.key) {
+    mesh::Utils::toHex(key_hex, res.key, 4);
+  } else {
+    sprintf(key_hex, "%04X????", (uint32_t)res.key_hint);
+  }
+  MESH_DEBUG_PRINTLN("%s SCOPE S%d %s key=%s age=%ds type=%d len=%d", getLogDateTime(), (uint32_t)res.scope_idx,
+                     SecureScopes::getStatusName(res.status), key_hex, (int)(now - res.timestamp),
+                     (uint32_t)pkt->getPayloadType(), (uint32_t)pkt->payload_len);
+  if (_logging) {
+    File f = openAppend(PACKET_LOG_FILE);
+    if (f) {
+      f.print(getLogDateTime());
+      f.printf(": SCOPE S%d %s key=%s age=%ds type=%d len=%d\n", (uint32_t)res.scope_idx, SecureScopes::getStatusName(res.status),
+               key_hex, (int)(now - res.timestamp), (uint32_t)pkt->getPayloadType(), (uint32_t)pkt->payload_len);
+      f.close();
+    }
+  }
+  return scope;
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
@@ -938,6 +973,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   pending_discover_until = 0;
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
+  _cli.setSecureScopes(&secure_scopes);
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {
@@ -948,6 +984,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
+  secure_scopes.load(_fs);
 
   // establish default-scope
   {
@@ -1153,6 +1190,10 @@ bool MyMesh::saveRegions() {
   return region_map.save(_fs);
 }
 
+bool MyMesh::saveSecureScopes() {
+  return secure_scopes.save(_fs);
+}
+
 void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
   if (r) {
     region_map.getTransportKeysFor(*r, &default_scope, 1);
@@ -1190,6 +1231,7 @@ void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
 void MyMesh::clearStats() {
   radio_driver.resetStats();
   resetStats();
+  secure_scopes.resetStats();
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 

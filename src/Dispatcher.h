@@ -98,6 +98,14 @@ public:
   virtual Packet* removeOutboundByIdx(int i) = 0;
   virtual void queueInbound(Packet* packet, uint32_t scheduled_for) = 0;
   virtual Packet* getNextInbound(uint32_t now) = 0;
+
+  /**
+   * \brief  secure scope aware variants. Reserved traffic (lowest scope first) is always ahead of public traffic.
+   * \param  max_scope  only consider packets with packet->scope <= max_scope  (SCOPE_NONE for all)
+   *   NOTE: default impls ignore scopes, ie. no reservations are enforced
+   */
+  virtual Packet* getNextOutbound(uint32_t now, uint8_t max_scope) { return getNextOutbound(now); }
+  virtual int getOutboundCount(uint32_t now, uint8_t max_scope) const { return getOutboundCount(now); }
 };
 
 typedef uint32_t  DispatcherAction;
@@ -110,6 +118,7 @@ typedef uint32_t  DispatcherAction;
 #define ERR_EVENT_FULL              (1 << 0)
 #define ERR_EVENT_CAD_TIMEOUT       (1 << 1)
 #define ERR_EVENT_STARTRX_TIMEOUT   (1 << 2)
+#define ERR_EVENT_RESERVE_DROP      (1 << 3)   // public packet dropped, to keep packet pool reserved for secure scopes
 
 /**
  * \brief  The low-level task that manages detecting incoming Packets, and the queueing
@@ -125,12 +134,15 @@ class Dispatcher {
   bool  prev_isrecv_mode;
   uint32_t n_sent_flood, n_sent_direct;
   uint32_t n_recv_flood, n_recv_direct;
+  uint32_t n_reserve_drops;
   unsigned long tx_budget_ms;
   unsigned long last_budget_update;
   unsigned long duty_cycle_window_ms;
 
   void processRecvPacket(Packet* pkt);
   void updateTxBudget();
+  unsigned long getMaxTxBudget() const;
+  uint8_t getMaxScopeForBudget(unsigned long needed) const;
 
 protected:
   PacketManager* _mgr;
@@ -172,6 +184,17 @@ protected:
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
   virtual unsigned long getDutyCycleWindowMs() const { return 3600000; }
 
+  /**
+   * \brief  Secure scopes. Reservations are layered: public traffic cannot use what is reserved for S0..S2,
+   *        S2 cannot use what is reserved for S0..S1, S1 cannot use what is reserved for S0.
+   * \returns  the verified scope of a received packet (one of SCOPE_*). Default: everything is public.
+   */
+  virtual uint8_t classifyRecvPacket(Packet* pkt) { return SCOPE_NONE; }
+  virtual uint8_t getAirtimeReservePct(uint8_t scope) const { return 0; }   // percent of TX budget, reserved for scope
+  virtual uint8_t getPoolReserve(uint8_t scope) const { return 0; }         // num of packet pool slots, reserved for scope
+  int getPoolFloor(uint8_t scope) const;       // free slots that packets of given scope may NOT use
+  unsigned long getAirtimeFloor(uint8_t scope) const;   // TX budget (millis) that packets of given scope may NOT use
+
 public:
   void begin();
   void loop();
@@ -187,8 +210,10 @@ public:
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
+  uint32_t getNumReserveDrops() const { return n_reserve_drops; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
+    n_reserve_drops = 0;
     _err_flags = 0;
   }
 

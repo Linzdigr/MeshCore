@@ -5,6 +5,7 @@
 #include <helpers/SensorManager.h>
 #include <helpers/ClientACL.h>
 #include <helpers/RegionMap.h>
+#include <helpers/SecureScopes.h>
 #include <helpers/ConfigSerializer.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
@@ -230,6 +231,13 @@ public:
     // no op by default
   }
 
+  virtual bool saveSecureScopes() {
+    return false;
+  }
+  virtual uint32_t getNumPoolReserveDrops() {
+    return 0;
+  }
+
   virtual void setBridgeState(bool enable) {
     // no op by default
   };
@@ -257,6 +265,7 @@ class CommonCLI {
   SensorManager* _sensors;
   RegionMap* _region_map;
   ClientACL* _acl;
+  SecureScopes* _scopes;
   char tmp[PRV_KEY_SIZE*2 + 4];
 
   mesh::RTCClock* getRTCClock() { return _rtc; }
@@ -264,12 +273,15 @@ class CommonCLI {
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
 
   void handleRegionCmd(char* command, char* reply);
+  void handleScopeCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
 
 public:
   CommonCLI(mesh::MainBoard& board, mesh::RTCClock& rtc, SensorManager& sensors, RegionMap& region_map, ClientACL& acl, NodePrefs* prefs, CommonCLICallbacks* callbacks)
-      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
+      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks), _scopes(NULL) { }
+
+  void setSecureScopes(SecureScopes* scopes) { _scopes = scopes; }   // enables the 'scope' commands
 
   void loadPrefs(FILESYSTEM* _fs);
   bool savePrefs(FILESYSTEM* _fs);
